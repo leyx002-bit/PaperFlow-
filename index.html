@@ -32,18 +32,16 @@ const { useState } = React;
 // ---------- SET THESE ----------
 const SUPABASE_URL = "https://bexxokaxumbfafngeiri.supabase.co";
 const SUPABASE_KEY = "sb_publishable_i_0t_YDuEWP9J9vxvt2vFw_eOzqx-QA";  // publishable key: safe in the browser
-const BANK_NAME = "ACCESS BANK";
-const BANK_ACCOUNT_NUMBER = "1932341962";
-const BANK_ACCOUNT_NAME = "IFEANYI STANLEY CHINONSO";
-const LOGIN_EMAIL_DOMAIN = "pf-users.com";   // phone numbers log in as phone@this-domain behind the scenes
+// The account buyers pay into is stored in the database (app_config), not in this file.
+const LOGIN_INBOX = "2colourdesign@gmail.com";   // YOUR real inbox. Each phone number logs in as yourname+phone@gmail.com behind the scenes; Gmail delivers those to you
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_OK = (() => { try { localStorage.setItem("__pf", "1"); localStorage.removeItem("__pf"); return true; } catch (e) { return false; } })();
 const fail = message => ({ error: { message } });
 const baseUrl = () => location.origin + location.pathname;
-const authEmail = phone => phone + "@" + LOGIN_EMAIL_DOMAIN;
+const authEmail = phone => LOGIN_INBOX.split("@")[0] + "+" + phone + "@" + LOGIN_INBOX.split("@")[1];
 
-function mapRoom(r, events, evidence, payout) {
+function mapRoom(r, events, evidence, payout, refund) {
   const party = (id, name, phone) => id ? { id, name: name || ("User " + (phone || "").slice(-4)), phone } : null;
   return {
     code: r.code, kind: r.kind, title: r.title, desc: r.descr, price: Number(r.price), deadline: r.deadline || "",
@@ -51,6 +49,7 @@ function mapRoom(r, events, evidence, payout) {
     buyer: party(r.buyer_id, r.buyer_name, r.buyer_phone), seller: party(r.seller_id, r.seller_name, r.seller_phone),
     ok: { buyer: r.buyer_ok, seller: r.seller_ok },
     sellerBank: payout ? { bankName: payout.bank_name, accountNumber: payout.account_number, accountName: payout.account_name } : null,
+    buyerRefund: refund ? { bankName: refund.bank_name, accountNumber: refund.account_number, accountName: refund.account_name } : null,
     log: events.map(e => ({ t: e.created_at, text: e.text })),
     evidence: evidence.map(x => ({ who: x.who, text: x.text, t: x.created_at })),
   };
@@ -74,22 +73,24 @@ const api = {
   },
   async logout() { await sb.auth.signOut(); },
   async fetchFullState(userId) {
-    const [p, rooms, events, ev, pay, notes] = await Promise.all([
+    const [p, rooms, events, ev, pay, notes, ref] = await Promise.all([
       sb.from("profiles").select("*").eq("id", userId).single(),
       sb.from("rooms").select("*").order("updated_at", { ascending: false }),
       sb.from("room_events").select("room_code,text,created_at").order("id", { ascending: true }),
       sb.from("evidence").select("room_code,who,text,created_at").order("id", { ascending: true }),
       sb.from("room_payouts").select("*"),
       sb.from("notifications").select("*").order("created_at", { ascending: false }).limit(100),
+      sb.from("room_refunds").select("*"),
     ]);
     if (p.error || !p.data || rooms.error) return null;
     const evByRoom = groupBy(events.data || [], "room_code"), evidByRoom = groupBy(ev.data || [], "room_code");
     const payByRoom = {}; (pay.data || []).forEach(x => { payByRoom[x.room_code] = x; });
+    const refByRoom = {}; (ref.data || []).forEach(x => { refByRoom[x.room_code] = x; });
     return {
       authed: true, userId, isAdmin: !!p.data.is_admin,
       profile: { name: p.data.name || "", email: p.data.email || "", phone: p.data.phone || "" },
       notifications: (notes.data || []).map(n => ({ id: n.id, text: n.text, at: n.created_at, read: n.read })).reverse(),
-      rooms: rooms.data.map(r => mapRoom(r, evByRoom[r.code] || [], evidByRoom[r.code] || [], payByRoom[r.code])),
+      rooms: rooms.data.map(r => mapRoom(r, evByRoom[r.code] || [], evidByRoom[r.code] || [], payByRoom[r.code], refByRoom[r.code])),
     };
   },
   async rpc(name, args) {
@@ -121,6 +122,7 @@ const C = {
   gold: "#D9A441",
 };
 
+const num = v => Number(String(v).replace(/[,\s\u20A6]/g, ""));
 function fmt(n) {
   return "\u20A6" + Math.round(Number(n || 0)).toLocaleString("en-NG");
 }
@@ -546,7 +548,7 @@ const cardS = { background: C.paper, border: `1px solid ${C.line}`, borderRadius
 
 function CreateRoom({ onBack, onCreate }) {
   const [f, setF] = useState({ kind: "goods", role: "buyer", title: "", desc: "", price: "", deadline: "" });
-  const set = k => e => setF({ ...f, [k]: e.target.value }), R = ROLE[f.kind], ok = f.title.trim().length > 2 && Number(f.price) > 0;
+  const set = k => e => setF({ ...f, [k]: e.target.value }), R = ROLE[f.kind], ok = f.title.trim().length > 2 && num(f.price) > 0;
   return (
     <div><TopBar title="New deal room" onBack={onBack} />
       <div style={{ padding: 18 }}>
@@ -558,7 +560,7 @@ function CreateRoom({ onBack, onCreate }) {
         <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 4 }}>{f.kind === "goods" ? "Delivery deadline" : "Deadline"}</div>
         <input style={inpS} type="date" value={f.deadline} onChange={set("deadline")} />
         <button disabled={!ok} style={btnS(ok ? C.forest : C.line, { color: ok ? C.cream : C.inkSoft })}
-          onClick={() => onCreate({ ...f, title: f.title.trim(), desc: f.desc.trim(), price: Number(f.price) })}>Create room and get code</button>
+          onClick={() => onCreate({ ...f, title: f.title.trim(), desc: f.desc.trim(), price: num(f.price) })}>Create room and get code</button>
       </div></div>
   );
 }
@@ -585,7 +587,12 @@ function JoinRoom({ onBack, onJoin }) {
 }
 
 function PayPopup({ r, onClose, onClaim }) {
-  const [copied, setCopied] = useState("");
+  const [copied, setCopied] = useState(""), [acct, setAcct] = useState(null), [err, setErr] = useState(""), [busy, setBusy] = useState(false);
+  React.useEffect(() => {
+    let on = true;
+    api.rpc("get_pay_account", { p_code: r.code }).then(res => { if (!on) return; if (res.error) setErr(res.error.message); else setAcct(res.data); });
+    return () => { on = false; };
+  }, [r.code]);
   const Row = ({ label, value }) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 0", borderBottom: `1px solid ${C.line}` }}>
       <div><div style={{ fontSize: 11, color: C.inkSoft }}>{label}</div><div style={{ fontFamily: "Georgia, serif", fontSize: 16, color: C.ink, marginTop: 2 }}>{value}</div></div>
@@ -601,11 +608,11 @@ function PayPopup({ r, onClose, onClaim }) {
           <div style={{ fontFamily: "Georgia, serif", fontSize: 17 }}>Pay into the PaperFlow account</div>
           <button onClick={onClose} aria-label="Close" style={{ background: "none", border: "none", fontSize: 24, color: C.inkSoft, cursor: "pointer" }}>&times;</button></div>
         <div style={{ background: `linear-gradient(125deg, ${C.forestDeep}, ${C.forest})`, color: C.cream, borderRadius: 14, padding: 18, marginBottom: 16 }}>
-          <div style={{ fontSize: 12, opacity: 0.75 }}>Amount to transfer</div><div style={{ fontFamily: "Georgia, serif", fontSize: 28, marginTop: 4 }}>{fmt(r.price)}</div></div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>Amount to transfer (exactly this amount)</div><div style={{ fontFamily: "Georgia, serif", fontSize: 28, marginTop: 4 }}>{fmt(r.price)}</div></div>
         <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, padding: "4px 14px", marginBottom: 14, background: C.paper }}>
-          <Row label="Bank" value={BANK_NAME} /><Row label="Account number" value={BANK_ACCOUNT_NUMBER} /><Row label="Account name" value={BANK_ACCOUNT_NAME} /><Row label="Narration" value={r.code} /></div>
+          {acct ? <><Row label="Bank" value={acct.bank} /><Row label="Account number" value={acct.number} /><Row label="Account name" value={acct.name} /><Row label="Narration" value={r.code} /></> : <div style={{ padding: "14px 0", fontSize: 13, color: C.inkSoft }}>{err || "Loading account details..."}</div>}</div>
         <div style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.6, marginBottom: 12 }}>Put <b>{r.code}</b> in the narration. The seller is only told to ship after PaperFlow confirms the money in the bank, so your tap below is not proof of payment.</div>
-        <button onClick={() => onClaim(r)} style={btnS(C.clay)}>I've made the payment</button>
+        <button disabled={!acct || busy} onClick={async () => { setBusy(true); await onClaim(r); setBusy(false); }} style={btnS(C.clay, (!acct || busy) ? { opacity: 0.6 } : undefined)}>I've made the payment</button>
       </div></div>
   );
 }
@@ -613,6 +620,7 @@ function PayPopup({ r, onClose, onClaim }) {
 function Room({ r, me, onBack, act, admin, showPay, toast }) {
   const [text, setText] = useState(""), [track, setTrack] = useState(""), [terms, setTerms] = useState(null), [busy, setBusy] = useState(false);
   const [bank, setBank] = useState({ bankName: "", accountNumber: "", accountName: "" });
+  const [rf, setRf] = useState({ bankName: "", accountNumber: "", accountName: "" });
   const mine = r.buyer && r.buyer.id === me ? "buyer" : r.seller && r.seller.id === me ? "seller" : null;
   const R = ROLE[r.kind], fee = r.price * r.feePercent / 100, payout = r.price - fee;
   async function call(name, args, msg) {
@@ -622,7 +630,7 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
   }
   const accept = () => call("accept_terms", {}, "You accepted the terms");
   const saveTerms = async () => {
-    if (await call("update_terms", { p_title: terms.title, p_desc: terms.desc, p_price: Number(terms.price) || r.price, p_deadline: terms.deadline || null }, "Terms updated")) setTerms(null);
+    if (await call("update_terms", { p_title: terms.title, p_desc: terms.desc, p_price: num(terms.price) || r.price, p_deadline: terms.deadline || null }, "Terms updated")) setTerms(null);
   };
   const addEvidence = async () => {
     if (text.trim().length < 2) return;
@@ -657,6 +665,17 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
           <div style={sm}>Send this code to the other person. They open PaperFlow, tap Join Deal and type it in.</div>{B("Share room code", share, "ghost")}</div>}
         {mine === "buyer" && r.status === "agreed" && B("Pay now", showPay, C.clay)}
         {mine === "buyer" && r.status === "payment_claimed" && <div style={{ ...sm, marginBottom: 10 }}>We are confirming your payment in the bank. This page updates by itself.</div>}
+        {mine === "buyer" && ["agreed", "payment_claimed", "funded", "shipped", "disputed"].includes(r.status) && !r.buyerRefund && <div style={cardS}>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 15, marginBottom: 4 }}>Refund account (optional)</div>
+          <div style={{ ...sm, marginBottom: 8 }}>If the deal is cancelled or goes wrong, your money is sent back here. Add it now so a refund is not delayed.</div>
+          <input style={inpS} placeholder="Bank name" value={rf.bankName} onChange={e => setRf({ ...rf, bankName: e.target.value })} />
+          <input style={inpS} inputMode="numeric" placeholder="Account number (10 digits)" value={rf.accountNumber} onChange={e => setRf({ ...rf, accountNumber: e.target.value.replace(/[^0-9]/g, "").slice(0, 10) })} />
+          <input style={inpS} placeholder="Account name" value={rf.accountName} onChange={e => setRf({ ...rf, accountName: e.target.value })} />
+          {B("Save refund account", () => {
+            if (rf.bankName.trim().length < 2 || rf.accountNumber.length !== 10 || rf.accountName.trim().length < 3) { toast("Enter the bank, a 10-digit account number and the account name."); return; }
+            call("save_refund_account", { p_bank: rf.bankName.trim(), p_account: rf.accountNumber, p_name: rf.accountName.trim() }, "Refund account saved");
+          }, "ghost")}</div>}
+        {mine === "buyer" && r.buyerRefund && !["released", "cancelled", "refunded"].includes(r.status) && <div style={{ ...sm, marginBottom: 10 }}>Refund account: {r.buyerRefund.bankName} {r.buyerRefund.accountNumber}</div>}
         {mine === "seller" && ["agreed", "payment_claimed"].includes(r.status) && <div style={{ ...sm, marginBottom: 10 }}>Waiting for the buyer's payment to be confirmed. Do not ship yet.</div>}
         {mine === "seller" && ["agreed", "payment_claimed", "funded", "shipped", "received"].includes(r.status) && !r.sellerBank && <div style={cardS}>
           <div style={{ fontFamily: "Georgia, serif", fontSize: 15, marginBottom: 4 }}>Where should we pay you?</div>
@@ -681,7 +700,10 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
           {mine && <><textarea style={{ ...inpS, minHeight: 60, marginTop: 10 }} placeholder="Message, link or description of your evidence" value={text} onChange={e => setText(e.target.value)} />{B("Submit evidence", addEvidence)}</>}</div>}
         {admin && <div style={{ ...cardS, border: `2px solid ${C.clay}` }}><div style={{ fontFamily: "Georgia, serif", fontSize: 15 }}>Admin actions</div>
           <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>{r.sellerBank ? <>Pay the seller <b>{fmt(payout)}</b> to:<br />{r.sellerBank.bankName}<br /><b>{r.sellerBank.accountNumber}</b><br />{r.sellerBank.accountName}</> : "The seller has not added payout details yet."}</div>
+          {r.status === "payment_claimed" && <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>Before you confirm, check your bank shows exactly <b>{fmt(r.price)}</b> with narration <b>{r.code}</b>.</div>}
           {r.status === "payment_claimed" && B("Payment confirmed in my bank", () => call("admin_confirm_payment", {}, "Payment confirmed. Seller can ship."), C.clay)}
+          {r.status === "payment_claimed" && B("Money did not arrive", () => call("admin_reject_payment", {}, "Sent back to the buyer"), "ghost")}
+          {["disputed", "funded", "shipped"].includes(r.status) && <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>{r.buyerRefund ? <>If you refund, send <b>{fmt(r.price)}</b> to:<br />{r.buyerRefund.bankName}<br /><b>{r.buyerRefund.accountNumber}</b><br />{r.buyerRefund.accountName}</> : "The buyer has not added refund details. Call " + (r.buyer ? r.buyer.phone : "them") + " before refunding."}</div>}
           {["received", "disputed"].includes(r.status) && B("I have paid the seller " + fmt(payout), () => call("admin_release", {}, "Marked as released"), C.clay)}
           {r.status === "disputed" && B("I have refunded the buyer", () => call("admin_refund", {}, "Marked as refunded"), C.clay)}
           <div style={{ ...sm, marginTop: 6 }}>Both phones update by themselves after each action.</div></div>}
