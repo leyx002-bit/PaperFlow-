@@ -53,7 +53,7 @@ const fail = message => ({ error: { message } });
 const baseUrl = () => location.origin + location.pathname;
 const authEmail = phone => LOGIN_INBOX.split("@")[0] + "+" + phone + "@" + LOGIN_INBOX.split("@")[1];
 
-function mapRoom(r, events, evidence, payout, refund) {
+function mapRoom(r, events, evidence, payout, refund, secret) {
   const party = (id, name, phone) => id ? { id, name: name || ("User " + (phone || "").slice(-4)), phone } : null;
   return {
     code: r.code, kind: r.kind, title: r.title, desc: r.descr, price: Number(r.price), deadline: r.deadline || "",
@@ -61,6 +61,7 @@ function mapRoom(r, events, evidence, payout, refund) {
     buyer: party(r.buyer_id, r.buyer_name, r.buyer_phone), seller: party(r.seller_id, r.seller_name, r.seller_phone),
     ok: { buyer: r.buyer_ok, seller: r.seller_ok },
     sellerBank: payout ? { bankName: payout.bank_name, accountNumber: payout.account_number, accountName: payout.account_name } : null,
+    info: secret ? secret.content : null,
     buyerRefund: refund ? { bankName: refund.bank_name, accountNumber: refund.account_number, accountName: refund.account_name } : null,
     log: events.map(e => ({ t: e.created_at, text: e.text })),
     evidence: evidence.map(x => ({ who: x.who, text: x.text, t: x.created_at })),
@@ -85,7 +86,7 @@ const api = {
   },
   async logout() { await sb.auth.signOut(); },
   async fetchFullState(userId) {
-    const [p, rooms, events, ev, pay, notes, ref] = await Promise.all([
+    const [p, rooms, events, ev, pay, notes, ref, sec] = await Promise.all([
       sb.from("profiles").select("*").eq("id", userId).single(),
       sb.from("rooms").select("*").order("updated_at", { ascending: false }),
       sb.from("room_events").select("room_code,text,created_at").order("id", { ascending: true }),
@@ -93,16 +94,18 @@ const api = {
       sb.from("room_payouts").select("*"),
       sb.from("notifications").select("*").order("created_at", { ascending: false }).limit(100),
       sb.from("room_refunds").select("*"),
+      sb.from("room_secrets").select("*"),
     ]);
     if (p.error || !p.data || rooms.error) return null;
     const evByRoom = groupBy(events.data || [], "room_code"), evidByRoom = groupBy(ev.data || [], "room_code");
     const payByRoom = {}; (pay.data || []).forEach(x => { payByRoom[x.room_code] = x; });
     const refByRoom = {}; (ref.data || []).forEach(x => { refByRoom[x.room_code] = x; });
+    const secByRoom = {}; (sec.data || []).forEach(x => { secByRoom[x.room_code] = x; });
     return {
       authed: true, userId, isAdmin: !!p.data.is_admin,
       profile: { name: p.data.name || "", email: p.data.email || "", phone: p.data.phone || "" },
       notifications: (notes.data || []).map(n => ({ id: n.id, text: n.text, at: n.created_at, read: n.read })).reverse(),
-      rooms: rooms.data.map(r => mapRoom(r, evByRoom[r.code] || [], evidByRoom[r.code] || [], payByRoom[r.code], refByRoom[r.code])),
+      rooms: rooms.data.map(r => mapRoom(r, evByRoom[r.code] || [], evidByRoom[r.code] || [], payByRoom[r.code], refByRoom[r.code], secByRoom[r.code])),
     };
   },
   async rpc(name, args) {
@@ -110,8 +113,10 @@ const api = {
     return error ? fail(error.message) : { data };
   },
   async createRoom(f) {
-    const res = await api.rpc("create_room", { p_kind: f.kind, p_role: f.role, p_title: f.title, p_desc: f.desc, p_price: f.price, p_deadline: f.deadline || null });
-    return res.error ? res : { code: res.data };
+    const res = await api.rpc("create_room", { p_kind: f.kind === "info" ? "goods" : f.kind, p_role: f.role, p_title: f.title, p_desc: f.desc, p_price: f.price, p_deadline: f.deadline || null });
+    if (res.error) return res;
+    if (f.kind === "info") { const c = await api.rpc("convert_to_info", { p_code: res.data }); if (c.error) return c; }
+    return { code: res.data };
   },
   async updateProfile(userId, name, email) {
     const { error } = await sb.from("profiles").update({ name, email }).eq("id", userId);
@@ -139,10 +144,10 @@ function fmt(n) {
   return "\u20A6" + Math.round(Number(n || 0)).toLocaleString("en-NG");
 }
 
-const ROLE = { goods: { buyer: "Buyer", seller: "Seller" }, freelance: { buyer: "Client", seller: "Freelancer" } };
+const ROLE = { goods: { buyer: "Buyer", seller: "Seller" }, freelance: { buyer: "Client", seller: "Freelancer" }, info: { buyer: "Buyer", seller: "Seller" } };
 const STATUS = {
   open: "Waiting for the other party", negotiating: "Agreeing the terms", agreed: "Agreed, waiting for payment",
-  payment_claimed: "Payment sent, being confirmed", funded: "Payment confirmed, seller can ship", shipped: "Shipped, buyer to confirm",
+  payment_claimed: "Payment sent, being confirmed", funded: "Payment confirmed, seller can ship", submitted: "Information submitted, PaperFlow is checking it", shipped: "Shipped, buyer to confirm",
   received: "Received, release being processed", released: "Completed, seller paid", disputed: "In dispute",
   refunded: "Refunded to buyer", cancelled: "Cancelled",
 };
@@ -564,7 +569,7 @@ function CreateRoom({ onBack, onCreate }) {
   return (
     <div><TopBar title="New deal room" onBack={onBack} />
       <div style={{ padding: 18 }}>
-        <select style={inpS} value={f.kind} onChange={set("kind")}><option value="goods">Buying / selling a physical item</option><option value="freelance">Freelance work</option></select>
+        <select style={inpS} value={f.kind} onChange={set("kind")}><option value="goods">Buying / selling a physical item</option><option value="freelance">Freelance work</option><option value="info">Selling information (login, code, details)</option></select>
         <select style={inpS} value={f.role} onChange={set("role")}><option value="buyer">I am the {R.buyer}</option><option value="seller">I am the {R.seller}</option></select>
         <input style={inpS} placeholder={f.kind === "goods" ? "Item (e.g. iPhone 13, used)" : "Job title"} value={f.title} onChange={set("title")} />
         <textarea style={{ ...inpS, minHeight: 90 }} placeholder={f.kind === "goods" ? "Condition, what is included, how it will be delivered" : "What work is required"} value={f.desc} onChange={set("desc")} />
@@ -633,6 +638,7 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
   const [text, setText] = useState(""), [track, setTrack] = useState(""), [terms, setTerms] = useState(null), [busy, setBusy] = useState(false);
   const [bank, setBank] = useState({ bankName: "", accountNumber: "", accountName: "" });
   const [rf, setRf] = useState({ bankName: "", accountNumber: "", accountName: "" });
+  const [secret, setSecret] = useState("");
   const mine = r.buyer && r.buyer.id === me ? "buyer" : r.seller && r.seller.id === me ? "seller" : null;
   const R = ROLE[r.kind], fee = r.price * r.feePercent / 100, payout = r.price - fee;
   async function call(name, args, msg) {
@@ -701,8 +707,19 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
           })}</div>}
         {mine === "seller" && r.sellerBank && !["released", "cancelled", "refunded"].includes(r.status) && <div style={{ ...sm, marginBottom: 10 }}>Payout to: {r.sellerBank.bankName} {r.sellerBank.accountNumber}</div>}
         {mine === "seller" && r.status === "funded" && !r.sellerBank && <div style={{ ...sm, marginBottom: 10 }}>Add your payout details above before you ship.</div>}
-        {mine === "seller" && r.status === "funded" && r.sellerBank && <div style={cardS}><div style={{ ...sm, marginBottom: 8 }}>Payment confirmed. You can ship now.</div><input style={inpS} placeholder="Tracking / delivery details (optional)" value={track} onChange={e => setTrack(e.target.value)} />
+        {mine === "seller" && r.kind !== "info" && r.status === "funded" && r.sellerBank && <div style={cardS}><div style={{ ...sm, marginBottom: 8 }}>Payment confirmed. You can ship now.</div><input style={inpS} placeholder="Tracking / delivery details (optional)" value={track} onChange={e => setTrack(e.target.value)} />
           {B(r.kind === "goods" ? "I have shipped the item" : "I have submitted the work", async () => { if (await call("mark_shipped", { p_note: track }, "Marked as delivered")) setTrack(""); })}</div>}
+        {mine === "seller" && r.kind === "info" && r.status === "funded" && r.sellerBank && <div style={cardS}>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 15, marginBottom: 4 }}>Type the information you are selling</div>
+          <div style={{ ...sm, marginBottom: 8 }}>Payment is confirmed. Only PaperFlow can read this now. The buyer sees it only after PaperFlow approves it, and you are paid then.</div>
+          <textarea style={{ ...inpS, minHeight: 120 }} placeholder="Login, code or details" value={secret} onChange={e => setSecret(e.target.value)} />
+          {B("Submit for checking", async () => { if (await call("submit_info", { p_content: secret }, "Submitted. PaperFlow will check it.")) setSecret(""); })}</div>}
+        {mine === "seller" && r.kind === "info" && r.status === "submitted" && <div style={{ ...sm, marginBottom: 10 }}>Submitted. PaperFlow is checking it. You are paid once it is approved.</div>}
+        {mine === "buyer" && r.kind === "info" && r.status === "submitted" && <div style={{ ...sm, marginBottom: 10 }}>The seller has delivered the information. PaperFlow is checking it before sending it to you.</div>}
+        {mine === "buyer" && r.kind === "info" && r.info && ["received", "released"].includes(r.status) && <div style={cardS}>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 15, marginBottom: 6 }}>Your information</div>
+          <div style={{ fontSize: 14, whiteSpace: "pre-wrap", wordBreak: "break-word", color: C.ink }}>{r.info}</div>
+          {B("Copy", () => { try { navigator.clipboard.writeText(r.info); } catch (e) {} toast("Copied"); }, "ghost")}</div>}
         {mine === "buyer" && r.status === "shipped" && B(r.kind === "goods" ? "I received it, release the money" : "Accept the work, release the money", () => call("confirm_received", {}, "Thanks. PaperFlow will pay the seller."))}
         {mine && ["funded", "shipped"].includes(r.status) && <button style={btnS("ghost")} disabled={busy} onClick={() => call("report_problem", {}, "Problem reported")}>Report a problem</button>}
         {mine && ["open", "negotiating"].includes(r.status) && r.creator === me && <button style={btnS("ghost")} disabled={busy} onClick={() => call("cancel_room", {}, "Room cancelled")}>Cancel room</button>}
@@ -713,6 +730,9 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
         {admin && <div style={{ ...cardS, border: `2px solid ${C.clay}` }}><div style={{ fontFamily: "Georgia, serif", fontSize: 15 }}>Admin actions</div>
           <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>{r.sellerBank ? <>Pay the seller <b>{fmt(payout)}</b> to:<br />{r.sellerBank.bankName}<br /><b>{r.sellerBank.accountNumber}</b><br />{r.sellerBank.accountName}</> : "The seller has not added payout details yet."}</div>
           {r.status === "payment_claimed" && <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>Before you confirm, check your bank shows exactly <b>{fmt(r.price)}</b> with narration <b>{r.code}</b>.</div>}
+          {r.kind === "info" && r.info && ["submitted", "received", "released"].includes(r.status) && <div style={{ fontSize: 13, margin: "8px 0", padding: 10, background: C.cream, borderRadius: 8, whiteSpace: "pre-wrap", wordBreak: "break-word", color: C.ink }}><b>Information from the seller:</b><br />{r.info}</div>}
+          {r.status === "submitted" && B("Approve: send it to the buyer", () => call("admin_approve_info", {}, "Approved. The buyer can see it. Now pay the seller."), C.clay)}
+          {r.status === "submitted" && B("Reject: seller must fix it", () => call("admin_reject_info", {}, "Sent back to the seller"), "ghost")}
           {r.status === "payment_claimed" && B("Payment confirmed in my bank", () => call("admin_confirm_payment", {}, "Payment confirmed. Seller can ship."), C.clay)}
           {r.status === "payment_claimed" && B("Money did not arrive", () => call("admin_reject_payment", {}, "Sent back to the buyer"), "ghost")}
           {["disputed", "funded", "shipped"].includes(r.status) && <div style={{ fontSize: 13, margin: "8px 0", lineHeight: 1.6, color: C.ink }}>{r.buyerRefund ? <>If you refund, send <b>{fmt(r.price)}</b> to:<br />{r.buyerRefund.bankName}<br /><b>{r.buyerRefund.accountNumber}</b><br />{r.buyerRefund.accountName}</> : "The buyer has not added refund details. Call " + (r.buyer ? r.buyer.phone : "them") + " before refunding."}</div>}
@@ -727,7 +747,7 @@ function Room({ r, me, onBack, act, admin, showPay, toast }) {
 
 function AdminDesk({ onBack, onOpen, rooms }) {
   const [filter, setFilter] = useState("todo");
-  const todo = rooms.filter(r => ["payment_claimed", "received", "disputed"].includes(r.status));
+  const todo = rooms.filter(r => ["payment_claimed", "submitted", "received", "disputed"].includes(r.status));
   const list = filter === "todo" ? todo : rooms;
   return (
     <div><TopBar title="Admin desk" onBack={onBack} />
