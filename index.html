@@ -51,6 +51,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const STORAGE_OK = (() => { try { localStorage.setItem("__pf", "1"); localStorage.removeItem("__pf"); return true; } catch (e) { return false; } })();
 const fail = message => ({ error: { message } });
 const baseUrl = () => location.origin + location.pathname;
+const SUPPORT_WHATSAPP = "2349020476228";   // support / password-help WhatsApp number (international format, no +)
 const authEmail = phone => LOGIN_INBOX.split("@")[0] + "+" + phone + "@" + LOGIN_INBOX.split("@")[1];
 
 function mapRoom(r, events, evidence, payout, refund, secret) {
@@ -71,6 +72,11 @@ const groupBy = (rows, key) => rows.reduce((m, x) => { (m[x[key]] = m[x[key]] ||
 
 const api = {
   async register(phone, password, email) {
+    const out = await api._register(phone, password, email);
+    if (out.user) { try { await sb.from("profiles").update({ name: String(email || "").split("@")[0].slice(0, 40) }).eq("id", out.user.id); } catch (e) {} }
+    return out;
+  },
+  async _register(phone, password, email) {
     const { data, error } = await sb.auth.signUp({ email: authEmail(phone), password, options: { data: { phone, email } } });
     if (error) return fail(/already/i.test(error.message) ? "An account with this phone number already exists." : error.message);
     if (data.user && data.user.identities && data.user.identities.length === 0) return fail("An account with this phone number already exists.");
@@ -769,6 +775,7 @@ function MyPage({ onNav, userId, phone, unreadCount = 0, isAdmin = false }) {
     { label: "My Deals", icon: "history", to: "deals" },
     { label: "How it works", icon: "info", to: "how" },
     { label: "About Us", icon: "info", to: "about" },
+    { label: "Terms & Privacy", icon: "info", to: "terms" },
     ...(isAdmin ? [{ label: "Admin desk", icon: "settings", to: "admin" }] : []),
   ];
   return (
@@ -1020,6 +1027,7 @@ function Auth({ mode, setMode, onLogin }) {
   const [captchaCode, setCaptchaCode] = useState(() => generateCaptchaCode());
   const [captchaInput, setCaptchaInput] = useState("");
   const [error, setError] = useState("");
+  const [showPw, setShowPw] = useState(false), [showTerms, setShowTerms] = useState(false);
 
   function refreshCaptcha() {
     setCaptchaCode(generateCaptchaCode());
@@ -1103,7 +1111,7 @@ function Auth({ mode, setMode, onLogin }) {
             <Icon name="phone" size={17} />
           </span>
           <input value={phone} onChange={e => { setPhone(e.target.value); resetFormError(); }}
-            placeholder="" inputMode="tel"
+            placeholder="Phone number" inputMode="tel"
             style={{ ...inputStyle, paddingLeft: 40, marginBottom: 0 }} />
         </div>
         {mode === "register" && (
@@ -1112,7 +1120,7 @@ function Auth({ mode, setMode, onLogin }) {
               <Icon name="mail" size={16} />
             </span>
             <input value={email} onChange={e => { setEmail(e.target.value); resetFormError(); }}
-              placeholder="" type="email" inputMode="email"
+              placeholder="Email address" type="email" inputMode="email"
               style={{ ...inputStyle, paddingLeft: 40, marginBottom: 0 }} />
           </div>
         )}
@@ -1121,7 +1129,8 @@ function Auth({ mode, setMode, onLogin }) {
             <Icon name="lock" size={17} />
           </span>
           <input value={password} onChange={e => { setPassword(e.target.value); resetFormError(); }}
-            placeholder="" type="password" style={{ ...inputStyle, paddingLeft: 40, marginBottom: 0 }} />
+            placeholder="Password" type={showPw ? "text" : "password"} style={{ ...inputStyle, paddingLeft: 40, paddingRight: 64, marginBottom: 0 }} />
+          <button type="button" onClick={() => setShowPw(!showPw)} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.forest, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "6px 8px" }}>{showPw ? "Hide" : "Show"}</button>
         </div>
         {mode === "register" && (
           <div style={{ marginTop: 16 }}>
@@ -1146,6 +1155,9 @@ function Auth({ mode, setMode, onLogin }) {
           border: `1px solid ${C.forest}`, background: "none", color: C.forest,
           fontSize: 15, fontWeight: 700, cursor: "pointer",
         }}>{mode === "login" ? "Create an account" : "I have an account"}</button>
+        {mode === "login" && <a href={"https://wa.me/" + SUPPORT_WHATSAPP + "?text=" + encodeURIComponent("Hello PaperFlow, I forgot my password. My phone number is " + phone)} target="_blank" rel="noreferrer" style={{ display: "block", textAlign: "center", marginTop: 14, fontSize: 13, color: C.forest, fontWeight: 600 }}>Forgot password?</a>}
+        <div style={{ textAlign: "center", marginTop: 12 }}><button onClick={() => setShowTerms(!showTerms)} style={{ background: "none", border: "none", color: C.inkSoft, fontSize: 12, textDecoration: "underline", cursor: "pointer" }}>{showTerms ? "Hide terms and privacy" : "Terms and privacy"}</button></div>
+        {showTerms && <div style={{ marginTop: 12, background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: 14 }}><TermsText /></div>}
       </div>
     </div>
   );
@@ -1169,6 +1181,36 @@ function Simple({ title, onBack, icon, children }) {
         {children || "Nothing here yet."}
       </div>
     </div>
+  );
+}
+
+function TermsText() {
+  const h = { fontFamily: "Georgia, serif", fontSize: 14, color: C.ink, margin: "14px 0 4px" };
+  const p = { fontSize: 12.5, lineHeight: 1.6, color: C.inkSoft, margin: 0 };
+  return (
+    <div>
+      <div style={{ ...h, marginTop: 0 }}>What PaperFlow does</div>
+      <p style={p}>PaperFlow gives two people who have already agreed a deal a private room. The buyer pays, PaperFlow holds the money, and the seller is paid after the deal is completed.</p>
+      <div style={h}>Fees</div>
+      <p style={p}>PaperFlow keeps a fee of 10% of the agreed price. It is taken from the seller's payout, so the buyer pays only the agreed price.</p>
+      <div style={h}>Paying</div>
+      <p style={p}>Pay only into the account shown inside your deal room, and put the room code in the narration. Payments are checked by PaperFlow, and the seller is asked to ship or deliver only after the payment is confirmed.</p>
+      <div style={h}>Problems and refunds</div>
+      <p style={p}>Either person can report a problem after payment is confirmed, and both can add evidence. PaperFlow reviews it and decides whether to pay the seller or refund the buyer.</p>
+      <div style={h}>What you may not sell</div>
+      <p style={p}>Stolen or hacked data, accounts or logins you do not own, counterfeit goods, and anything illegal. PaperFlow may cancel such a deal and refuse to pay out.</p>
+      <div style={h}>Your information</div>
+      <p style={p}>We store your phone number, email, name, your deals, and the bank details you add for a payout or refund. The other person in a deal sees your name. A seller's bank details are visible only to that seller and to PaperFlow. For an information sale, the details the seller types are visible only to the seller and PaperFlow until PaperFlow approves them, and then the buyer can see them. PaperFlow staff are alerted about deal activity so payments can be checked. Your data is kept with our cloud database provider, and we do not sell it.</p>
+      <div style={h}>Help</div>
+      <p style={p}>For any problem, including a forgotten password, message PaperFlow support on WhatsApp.</p>
+    </div>
+  );
+}
+
+function TermsPage({ onBack }) {
+  return (
+    <div><TopBar title="Terms and privacy" onBack={onBack} />
+      <div style={{ padding: 18 }}><TermsText /></div></div>
   );
 }
 
@@ -1443,6 +1485,8 @@ function PaperFlow() {
       onMarkAllRead={async () => { await api.markAllRead(store.userId); await refresh(); }} />;
   } else if (screen === "about") {
     body = <AboutPage onBack={() => setScreen(null)} />;
+  } else if (screen === "terms") {
+    body = <TermsPage onBack={() => setScreen(null)} />;
   } else if (screen && SIMPLE_PAGES[screen]) {
     const pg = SIMPLE_PAGES[screen];
     body = <Simple title={pg.title} icon={pg.icon} onBack={() => setScreen(null)}>{pg.body}</Simple>;
